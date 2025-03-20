@@ -21,6 +21,7 @@ class AreaDims():
     
 class AreaGaze():
     type: str="gaze"
+    index: int
     dims: AreaDims
     to_dims: AreaDims
     full_dims: AreaDims
@@ -57,10 +58,7 @@ class AreaGaze():
         for match in matches:
             if "face" in matches[match] and "gaze" in matches[match]:
                 # detection dimensions are returned in absolute while we have relative from the reference image
-                logger.error(matches[match]["face"])
-                logger.error(get_absolute_dims(pil_image, vars(self.dims)))
-                logger.error(matches[match]["gaze"])
-                logger.error(get_absolute_dims(pil_image, vars(self.to_dims)))
+                logger.error( str(matches[match]["face"]) + " " + str(get_absolute_dims(pil_image, vars(self.dims))) + " " + str(matches[match]["gaze"]) + " " + str(get_absolute_dims(pil_image, vars(self.to_dims))) )
                 if check_box_overlap(matches[match]["face"], get_absolute_dims(pil_image, vars(self.dims)), .25) and check_box_overlap(matches[match]["gaze"], get_absolute_dims(pil_image, vars(self.to_dims)), .5):
                     self.classification = True
                     return True
@@ -69,6 +67,7 @@ class AreaGaze():
 
 class AreaDetectorBool():
     type: str="detector_bool"
+    index: int
     dims: AreaDims
     classification: bool
 
@@ -78,7 +77,7 @@ class AreaDetectorBool():
         self.dims = AreaDims()
 
     async def get_classification(self, logger, resource, image, ml_class, confidence):
-        detections = await resource.get_detections(crop_viam_image(image, self.dims))
+        detections = await resource.get_detections(crop_viam_image(image, vars(self.dims)))
         for d in detections:
             if (d.class_name == ml_class) and (d.confidence >= confidence):
                 self.classification = True
@@ -88,6 +87,7 @@ class AreaDetectorBool():
 
 class AreaDetectorCount():
     type: str="detector_count"
+    index: int
     dims: AreaDims
     classification: int
 
@@ -97,7 +97,7 @@ class AreaDetectorCount():
         self.dims = AreaDims()
 
     async def get_classification(self, logger, resource, image, ml_class, confidence):
-        detections = await resource.get_detections(crop_viam_image(image, self.dims))
+        detections = await resource.get_detections(crop_viam_image(image, vars(self.dims)))
         count = 0
         for d in detections:
             if (d.class_name == ml_class) and (d.confidence >= confidence):
@@ -107,6 +107,7 @@ class AreaDetectorCount():
 
 class AreaClassifier():
     type: str="classifier"
+    index: int
     dims: AreaDims
     classification: str
 
@@ -116,7 +117,7 @@ class AreaClassifier():
         self.dims = AreaDims()
   
     async def get_classification(self, logger, resource, image):
-        classifications = await resource.get_classifications(crop_viam_image(image, self.dims), 1)
+        classifications = await resource.get_classifications(crop_viam_image(image, vars(self.dims)), 1)
         classification = ""
         if len(classifications) > 0:
            classification = classifications[0].class_name
@@ -125,6 +126,7 @@ class AreaClassifier():
     
 class AreaClassifierBool():
     type: str="classifier_bool"
+    index: int
     dims: AreaDims
     classification: bool
 
@@ -135,7 +137,7 @@ class AreaClassifierBool():
 
     async def get_classification(self, logger, resource, image, ml_class, confidence):
         # we only look at the top 5 classifications, which could be artificially limiting?
-        classifications = await resource.get_classifications(crop_viam_image(image, self.dims), 5)
+        classifications = await resource.get_classifications(crop_viam_image(image, vars(self.dims)), 5)
         if len(classifications) > 0:
            for c in classifications:
                if (c.class_name == ml_class) and (c.confidence >= confidence):
@@ -146,6 +148,7 @@ class AreaClassifierBool():
     
 class AreaSensor():
     type: str="sensor"
+    index: int
     dims: AreaDims
     classification: any
 

@@ -1,6 +1,7 @@
 from viam.media.utils.pil import viam_to_pil_image, pil_to_viam_image
 from PIL import Image
 from viam.media.video import CameraMimeType
+from datetime import datetime
 
 def check_box_overlap(box1, box2, threshold=0.0):
     """
@@ -59,16 +60,15 @@ def check_box_overlap(box1, box2, threshold=0.0):
 
     return expanded_overlap or box1_contains_box2 or box2_contains_box1
 
-def merge_bounding_boxes(box1, box2, padding_percent = 0):
+def merge_bounding_boxes(box1, box2, padding = 0):
     """
     Merges two bounding boxes into a single bounding box that encompasses both.
 
     :param box1: Dictionary with 'x_min', 'x_max', 'y_min', 'y_max'
     :param box2: Dictionary with 'x_min', 'x_max', 'y_min', 'y_max'
-    :param padding_percent: padding to add, in percent 0-1
+    :param padding: percent padding to add, in percent 0-1
     :return: A new bounding box that contains both input boxes.
     """
-    padding = 1 + padding_percent
     merged_box = {
         "x_min": min(box1.x_min, box2.x_min) - (padding * min(box1.x_min, box2.x_min)),
         "x_max": max(box1.x_max, box2.x_max) + (padding * max(box1.x_max, box2.x_max)),
@@ -83,6 +83,11 @@ def crop_viam_image(viam_image, bbox):
 
     # Crop the image (left, upper, right, lower)
     cropped_image = image.crop((abs_dims["x_min"], abs_dims["y_min"], abs_dims["x_max"], abs_dims["y_max"]))
+    random_filename = f"{datetime.utcnow().strftime('%Y%m%d_%H%M%S_%f')}.jpg"
+
+    # Uncomment the below only for testing
+    #cropped_image.save(random_filename)
+    #print(f"Image saved as: {random_filename}")
 
     return pil_to_viam_image(cropped_image, CameraMimeType.JPEG)
 
@@ -101,3 +106,45 @@ def get_absolute_dims(image, bbox):
         "y_min": y_min,
         "y_max": y_max,
     }
+
+
+def sort_areas_ltr(areas, y_tolerance=0.02):
+    """
+    Sorts a list of areas by BoundingBox objects in Left-to-Right, Top-to-Bottom order.
+
+    Parameters:
+        areas: List of objects containing bounding box objects.
+        y_tolerance (float): Allowed Y-difference to consider boxes in the same row.
+
+    Returns:
+        List of sorted BoundingBox objects.
+    """
+    # Step 1: Sort by (top Y, then left X)
+    areas.sort(key=lambda b: (b.dims.y_min, b.dims.x_min))
+
+    # Step 2: Group boxes into rows based on Y proximity
+    rows = []
+    current_row = []
+
+    for area in areas:
+        if not current_row:
+            current_row.append(area)
+        else:
+            last_area = current_row[-1]
+            if abs(area.dims.y_min - last_area.dims.y_min) <= y_tolerance:
+                current_row.append(area)
+            else:
+                rows.append(current_row)
+                current_row = [area]
+    
+    if current_row:
+        rows.append(current_row)
+
+    # Step 3: Sort each row Left-to-Right
+    for row in rows:
+        row.sort(key=lambda b: b.dims.x_min)
+
+    # Flatten the sorted rows
+    sorted_areas = [area for row in rows for area in row]
+    
+    return sorted_areas

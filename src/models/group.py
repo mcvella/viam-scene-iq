@@ -9,10 +9,10 @@ class Group():
     resource = str
     actual_resource: VisionClient|Sensor
     reference_image: str
-    from_label: str
-    to_label: str
-    ml_class: str
-    confidence: float
+    from_label: str = ""
+    to_label: str = ""
+    ml_class: str = ""
+    confidence: float = 0.7
     areas: list[AreaClassifier|AreaClassifierBool|AreaDetectorBool|AreaDetectorCount|AreaGaze|AreaSensor]
 
     def __init__(self, **kwargs):

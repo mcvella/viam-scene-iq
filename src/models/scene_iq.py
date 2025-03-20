@@ -67,7 +67,8 @@ class SceneIq(Sensor, EasyResource):
         
         # reset this to force area dimensions to be reset on first call
         self.area_dims_calculated = False
-
+        self.group_states: list[Group] = []
+        
         attributes = struct_to_dict(config.attributes)
 
         self.max_readings_gap_secs = attributes.get("max_readings_gap_secs", 1)
@@ -115,7 +116,9 @@ class SceneIq(Sensor, EasyResource):
 
             binary_data = await self.app_client.data_client.binary_data_by_ids(binary_ids=[image_binary_id])
 
-            # store any "to" dimensions for gze detection so we can match them to the "from" afterwards
+            # we want to sort ltr so we store them first
+            areas = []
+            # store any "to" dimensions for gaze detection so we can match them to the "from" afterwards
             to_dims = []
 
             for bbox in binary_data[0].metadata.annotations.bboxes:
@@ -138,7 +141,7 @@ class SceneIq(Sensor, EasyResource):
                     area.dims.x_max = bbox.x_max_normalized
                     area.dims.y_min = bbox.y_min_normalized
                     area.dims.y_max = bbox.y_max_normalized
-                    group.areas.append(area)
+                    areas.append(area)
                 elif (group.to_label != "") and (group.type == "gaze") and (bbox.label == group.to_label):
                     dims = {
                         "x_min": bbox.x_min_normalized,
@@ -148,13 +151,16 @@ class SceneIq(Sensor, EasyResource):
                     }
                     to_dims.append(dims)
 
+            group.areas = sort_areas_ltr(areas, 0.07)
+
             # match "from" and "to" areas for gaze
             if group.type == "gaze":
                 for f in group.areas:
                     for t in to_dims:
                         if check_box_overlap(vars(f.dims), t):
                             f.to_dims = AreaDims(**t)
-                            f.full_dims = AreaDims(**merge_bounding_boxes(f.dims, f.to_dims, .2))
+                            f.full_dims = AreaDims(**merge_bounding_boxes(f.dims, f.to_dims, 0.03))
+                            break
 
         self.area_dims_calculated = True
 
@@ -173,14 +179,18 @@ class SceneIq(Sensor, EasyResource):
 
         tasks = []
         for g in self.group_states:
+            i = 0
             for a in g.areas:
+                # add an ordering index, this should stay static
+                a.index = i
+                i = i + 1
                 match a.type:
                     case "gaze":
                         tasks.append(asyncio.create_task(a.get_classification(self.logger, g.actual_resource, image)))
                     case "detector_bool":
                         tasks.append(asyncio.create_task(a.get_classification(self.logger, g.actual_resource, image, g.ml_class, g.confidence)))
                     case "detector_count":
-                        tasks.append(asyncio.create_task(a.classification(self.logger, g.actual_resource, image, g.ml_class, g.confidence)))
+                        tasks.append(asyncio.create_task(a.get_classification(self.logger, g.actual_resource, image, g.ml_class, g.confidence)))
                     case "classifier":
                         tasks.append(asyncio.create_task(a.get_classification(self.logger, g.actual_resource, image)))
                     case "classifier_bool":
@@ -196,7 +206,7 @@ class SceneIq(Sensor, EasyResource):
             }
             to_return[g.name]["areas"] = []
             for a in g.areas:
-                 to_return[g.name]["areas"].append({"classification": a.classification})
+                 to_return[g.name]["areas"].append({"index": a.index, "classification": a.classification})
         
         return to_return
     
