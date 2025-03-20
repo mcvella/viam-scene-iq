@@ -26,7 +26,7 @@ class AreaGaze():
     to_dims: AreaDims
     full_dims: AreaDims
     classification: bool
-
+    
     def __init__(self, **kwargs):
         for key, value in kwargs.items():
             self.__dict__[key] = value
@@ -58,7 +58,6 @@ class AreaGaze():
         for match in matches:
             if "face" in matches[match] and "gaze" in matches[match]:
                 # detection dimensions are returned in absolute while we have relative from the reference image
-                logger.error( str(matches[match]["face"]) + " " + str(get_absolute_dims(pil_image, vars(self.dims))) + " " + str(matches[match]["gaze"]) + " " + str(get_absolute_dims(pil_image, vars(self.to_dims))) )
                 if check_box_overlap(matches[match]["face"], get_absolute_dims(pil_image, vars(self.dims)), .25) and check_box_overlap(matches[match]["gaze"], get_absolute_dims(pil_image, vars(self.to_dims)), .5):
                     self.classification = True
                     return True

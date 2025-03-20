@@ -3,7 +3,7 @@ from typing import (Any, ClassVar, Dict, Final, List, Mapping, Optional,
 
 from typing_extensions import Self
 from viam.components.sensor import *
-from viam.proto.app.robot import ComponentConfig
+from viam.proto.app.robot import ComponentConfig, ServiceConfig
 from viam.proto.common import Geometry, ResourceName
 from viam.resource.base import ResourceBase
 from viam.resource.easy_resource import EasyResource
@@ -14,6 +14,11 @@ from viam.app.viam_client import ViamClient
 from viam.rpc.dial import DialOptions
 from viam.proto.app.data import BinaryID
 from viam.components.camera import Camera
+from viam.components.camera import ViamImage
+from viam.proto.common import PointCloudObject
+from viam.proto.service.vision import Classification, Detection
+from viam.services.vision import Vision, CaptureAllResult
+from viam.proto.service.vision import GetPropertiesResponse
 
 from .group import Group
 from .area import *
@@ -25,12 +30,10 @@ import asyncio
 GROUP_GLOBAL = {}
 
 class SceneIq(Sensor, EasyResource):
-    MODEL: ClassVar[Model] = Model(ModelFamily("mcvella", "scene-iq"), "scene-iq")
-    group_states: list[Group] = []
-    camera: Camera
-    area_dims_calculated: bool = False
-    max_readings_gap_secs: float = 1
-
+    MODEL: ClassVar[Model] = Model(ModelFamily("mcvella", "sensor"), "scene-iq")
+    name: str
+    vision_name: str
+    
     @classmethod
     def new(
         cls, config: ComponentConfig, dependencies: Mapping[ResourceName, ResourceBase]
@@ -42,7 +45,80 @@ class SceneIq(Sensor, EasyResource):
         deps = []
 
         attributes = struct_to_dict(config.attributes)
+        
+        vision_name = attributes.get("vision_name", "")
+        if vision_name == "":
+            raise Exception(f"vision_name must be defined, referencing a configured scene-iq vision service")
+        
+        return deps
 
+    def reconfigure(
+        self, config: ComponentConfig, dependencies: Mapping[ResourceName, ResourceBase]
+    ):
+        attributes = struct_to_dict(config.attributes)
+        
+        self.vision_name = attributes.get("vision_name")
+        
+        return super().reconfigure(config, dependencies)
+
+    async def get_readings(
+        self,
+        *,
+        extra: Optional[Mapping[str, Any]] = None,
+        timeout: Optional[float] = None,
+        **kwargs
+    ) -> Mapping[str, SensorReading]:
+        
+        to_return = {}
+
+        g: Group
+        for g in GROUP_GLOBAL[self.vision_name]:
+            to_return[g.name] = {
+                "name": g.name
+            }
+            to_return[g.name]["areas"] = []
+            for a in g.areas:
+                 to_return[g.name]["areas"].append({"index": a.index, "classification": a.classification})
+        
+        return to_return
+    
+    async def do_command(
+        self,
+        command: Mapping[str, ValueTypes],
+        *,
+        timeout: Optional[float] = None,
+        **kwargs
+    ) -> Mapping[str, ValueTypes]:
+        self.logger.error("`do_command` is not implemented")
+        raise NotImplementedError()
+
+    async def get_geometries(
+        self, *, extra: Optional[Dict[str, Any]] = None, timeout: Optional[float] = None
+    ) -> List[Geometry]:
+        self.logger.error("`get_geometries` is not implemented")
+        raise NotImplementedError()
+
+
+class SceneIqVision(Vision, EasyResource):
+    MODEL: ClassVar[Model] = Model(ModelFamily("mcvella", "vision"), "scene-iq")
+    name: str
+    group_states: list[Group] = []
+    camera: Camera
+    camera_name: str
+    area_dims_calculated: bool = False
+    
+    @classmethod
+    def new(
+        cls, config: ServiceConfig, dependencies: Mapping[ResourceName, ResourceBase]
+    ) -> Self:
+        return super().new(config, dependencies)
+    
+    @classmethod
+    def validate_config(cls, config: ServiceConfig) -> Sequence[str]:
+        deps = []
+
+        attributes = struct_to_dict(config.attributes)
+        
         groups = attributes.get("groups", [])
         for group in groups:
             if "resource" in group:
@@ -60,19 +136,18 @@ class SceneIq(Sensor, EasyResource):
             raise Exception(f"A camera resource name must be defined")
         
         return deps
-
+    
+    @classmethod
     def reconfigure(
-        self, config: ComponentConfig, dependencies: Mapping[ResourceName, ResourceBase]
+        self, config: ServiceConfig, dependencies: Mapping[ResourceName, ResourceBase]
     ):
-        
+
         # reset this to force area dimensions to be reset on first call
         self.area_dims_calculated = False
         self.group_states: list[Group] = []
-        
+
         attributes = struct_to_dict(config.attributes)
-
-        self.max_readings_gap_secs = attributes.get("max_readings_gap_secs", 1)
-
+        
         # set up each group, instantiating the correct resource client
         g: Group
         for group in attributes.get("groups", []):
@@ -85,16 +160,16 @@ class SceneIq(Sensor, EasyResource):
                 g.actual_resource = cast(Sensor, resource_dep)              
             self.group_states.append(g)
             
-        camera_name = attributes.get("camera", "")
-        camera_dep = dependencies[Camera.get_resource_name(camera_name)]
+        self.camera_name = attributes.get("camera", "")
+        camera_dep = dependencies[Camera.get_resource_name(self.camera_name)]
         self.camera = cast(Camera, camera_dep)
 
         # allow access at the global level by name so a vision service can also be exposed
-        GROUP_GLOBAL[config.name] = self.group_states
-        
-        return super().reconfigure(config, dependencies)
+        self.name = config.name
+        GROUP_GLOBAL[self.name] = self.group_states
 
-
+        return super().reconfigure(self, config, dependencies)
+    
     async def viam_connect(self) -> ViamClient:
         dial_options = DialOptions.with_api_key( 
             api_key=os.getenv('VIAM_API_KEY'),
@@ -164,18 +239,27 @@ class SceneIq(Sensor, EasyResource):
 
         self.area_dims_calculated = True
 
-    async def get_readings(
+    async def get_detections_from_camera(
+        self, camera_name: str, *, extra: Optional[Mapping[str, Any]] = None, timeout: Optional[float] = None
+    ) -> List[Detection]:
+        detections = []
+        if camera_name != self.camera_name:
+            return "Error: camera name must match configured camera"
+        else:
+            self.get_detections(await self.camera.get_image())
+    
+    async def get_detections(
         self,
+        image: Image.Image,
         *,
         extra: Optional[Mapping[str, Any]] = None,
         timeout: Optional[float] = None,
-        **kwargs
-    ) -> Mapping[str, SensorReading]:
+    ) -> List[Detection]:
         
+        detections = []
+
         if not self.area_dims_calculated:
             await self.calculate_area_dims()
-
-        image = await self.camera.get_image()
 
         tasks = []
         for g in self.group_states:
@@ -198,30 +282,73 @@ class SceneIq(Sensor, EasyResource):
                     case "sensor":
                         tasks.append(asyncio.create_task(a.get_classification(self.logger, g.actual_resource)))
         await asyncio.gather(*tasks)
-        to_return = {}
 
-        for g in self.group_states:
-            to_return[g.name] = {
-                "name": g.name
-            }
-            to_return[g.name]["areas"] = []
-            for a in g.areas:
-                 to_return[g.name]["areas"].append({"index": a.index, "classification": a.classification})
-        
-        return to_return
-    
-    async def do_command(
+        for group in self.group_states:
+            for area in group.areas:
+                # we could make this more efficient by storing it previously when it was calculated
+                if hasattr(area, 'full_dims'):
+                    abs_dims = get_absolute_dims(viam_to_pil_image(image), vars(area.full_dims))
+                else:
+                    abs_dims = get_absolute_dims(viam_to_pil_image(image), vars(area.dims))
+                detection = { "class_name" : f'{group.name}_{group.type}_{area.index}', "confidence": classification_to_float(area.classification),
+                              "x_min": abs_dims["x_min"], "x_max": abs_dims["x_max"], "y_min": abs_dims["y_min"], "y_max": abs_dims["y_max"]
+                              }
+                detections.append(detection)
+
+        return detections
+
+    async def get_classifications_from_camera(
         self,
-        command: Mapping[str, ValueTypes],
+        camera_name: str,
+        count: int,
         *,
+        extra: Optional[Mapping[str, Any]] = None,
         timeout: Optional[float] = None,
-        **kwargs
-    ) -> Mapping[str, ValueTypes]:
-        self.logger.error("`do_command` is not implemented")
+    ) -> List[Classification]:
+        raise NotImplementedError()
+ 
+    async def get_classifications(
+        self,
+        image: ViamImage,
+        count: int,
+        *,
+        extra: Optional[Mapping[str, Any]] = None,
+        timeout: Optional[float] = None,
+    ) -> List[Classification]:
         raise NotImplementedError()
 
-    async def get_geometries(
-        self, *, extra: Optional[Dict[str, Any]] = None, timeout: Optional[float] = None
-    ) -> List[Geometry]:
-        self.logger.error("`get_geometries` is not implemented")
+    async def get_object_point_clouds(
+        self, camera_name: str, *, extra: Optional[Mapping[str, Any]] = None, timeout: Optional[float] = None
+    ) -> List[PointCloudObject]:
         raise NotImplementedError()
+    
+    async def do_command(self, command: Mapping[str, ValueTypes], *, timeout: Optional[float] = None) -> Mapping[str, ValueTypes]:
+        raise NotImplementedError()
+
+    async def capture_all_from_camera(
+        self,
+        camera_name: str,
+        return_image: bool = False,
+        return_classifications: bool = False,
+        return_detections: bool = False,
+        return_object_point_clouds: bool = False,
+        *,
+        extra: Optional[Mapping[str, Any]] = None,
+        timeout: Optional[float] = None,
+    ) -> CaptureAllResult:
+        result = CaptureAllResult()
+        result.image = await self.camera.get_image()
+        result.detections = await self.get_detections(result.image)
+        return result
+
+    async def get_properties(
+        self,
+        *,
+        extra: Optional[Mapping[str, Any]] = None,
+        timeout: Optional[float] = None,
+    ) -> GetPropertiesResponse:
+        return GetPropertiesResponse(
+            classifications_supported=False,
+            detections_supported=True,
+            object_point_clouds_supported=False
+        )

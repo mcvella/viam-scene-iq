@@ -83,9 +83,9 @@ def crop_viam_image(viam_image, bbox):
 
     # Crop the image (left, upper, right, lower)
     cropped_image = image.crop((abs_dims["x_min"], abs_dims["y_min"], abs_dims["x_max"], abs_dims["y_max"]))
-    random_filename = f"{datetime.utcnow().strftime('%Y%m%d_%H%M%S_%f')}.jpg"
 
     # Uncomment the below only for testing
+    #random_filename = f"{datetime.utcnow().strftime('%Y%m%d_%H%M%S_%f')}.jpg"
     #cropped_image.save(random_filename)
     #print(f"Image saved as: {random_filename}")
 
@@ -148,3 +148,10 @@ def sort_areas_ltr(areas, y_tolerance=0.02):
     sorted_areas = [area for row in rows for area in row]
     
     return sorted_areas
+
+def classification_to_float(classification):
+    if isinstance(classification, bool):  
+        return int(classification)  # Convert True -> 1, False -> 0
+    elif isinstance(classification, int):  
+        return float(classification)  # Convert int -> float
+    return classification 
