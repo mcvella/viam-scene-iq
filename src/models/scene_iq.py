@@ -26,7 +26,9 @@ from .util import *
 
 import os
 import asyncio
+from datetime import datetime
 
+CLASSIFICATION_GLOBAL = {}
 GROUP_GLOBAL = {}
 
 class SceneIq(Sensor, EasyResource):
@@ -69,16 +71,19 @@ class SceneIq(Sensor, EasyResource):
         **kwargs
     ) -> Mapping[str, SensorReading]:
         
-        to_return = {}
+        if not self.vision_name in CLASSIFICATION_GLOBAL:
+            return {"groups": {}, "classification": ""}
+        
+        to_return = {"groups": {}, "classification": CLASSIFICATION_GLOBAL[self.vision_name]}
 
         g: Group
         for g in GROUP_GLOBAL[self.vision_name]:
-            to_return[g.name] = {
+            to_return["groups"][g.name] = {
                 "name": g.name
             }
-            to_return[g.name]["areas"] = []
+            to_return["groups"][g.name]["areas"] = []
             for a in g.areas:
-                 to_return[g.name]["areas"].append({"index": a.index, "classification": a.classification})
+                 to_return["groups"][g.name]["areas"].append({"index": a.index, "classification": a.classification, "history": str(a.history)})
         
         return to_return
     
@@ -98,6 +103,8 @@ class SceneIq(Sensor, EasyResource):
         self.logger.error("`get_geometries` is not implemented")
         raise NotImplementedError()
 
+##############################
+##############################
 
 class SceneIqVision(Vision, EasyResource):
     MODEL: ClassVar[Model] = Model(ModelFamily("mcvella", "vision"), "scene-iq")
@@ -106,7 +113,12 @@ class SceneIqVision(Vision, EasyResource):
     camera: Camera
     camera_name: str
     area_dims_calculated: bool = False
-    
+    classification_expressions: list[str] = []
+    classification: str = ""
+    default_classification: str = ""
+    last_vision_ts: datetime = None
+    max_vision_sec: int = 2
+
     @classmethod
     def new(
         cls, config: ServiceConfig, dependencies: Mapping[ResourceName, ResourceBase]
@@ -137,14 +149,13 @@ class SceneIqVision(Vision, EasyResource):
         
         return deps
     
-    @classmethod
     def reconfigure(
         self, config: ServiceConfig, dependencies: Mapping[ResourceName, ResourceBase]
     ):
 
         # reset this to force area dimensions to be reset on first call
         self.area_dims_calculated = False
-        self.group_states: list[Group] = []
+        self.group_states = []
 
         attributes = struct_to_dict(config.attributes)
         
@@ -164,11 +175,15 @@ class SceneIqVision(Vision, EasyResource):
         camera_dep = dependencies[Camera.get_resource_name(self.camera_name)]
         self.camera = cast(Camera, camera_dep)
 
+        self.max_vision_sec = attributes.get("max_vision_sec", 2)
+        self.default_classification = attributes.get("default_classification", "")
+        self.classification_expressions = attributes.get("classification_expressions", [])
+
         # allow access at the global level by name so a vision service can also be exposed
         self.name = config.name
         GROUP_GLOBAL[self.name] = self.group_states
 
-        return super().reconfigure(self, config, dependencies)
+        return super().reconfigure(config, dependencies)
     
     async def viam_connect(self) -> ViamClient:
         dial_options = DialOptions.with_api_key( 
@@ -209,8 +224,6 @@ class SceneIqVision(Vision, EasyResource):
                             area = AreaClassifier()
                         case "classifier_bool":
                             area = AreaClassifierBool()
-                        case "sensor":
-                            area = AreaSensor()
                     
                     area.dims.x_min = bbox.x_min_normalized
                     area.dims.x_max = bbox.x_max_normalized
@@ -238,29 +251,8 @@ class SceneIqVision(Vision, EasyResource):
                             break
 
         self.area_dims_calculated = True
-
-    async def get_detections_from_camera(
-        self, camera_name: str, *, extra: Optional[Mapping[str, Any]] = None, timeout: Optional[float] = None
-    ) -> List[Detection]:
-        detections = []
-        if camera_name != self.camera_name:
-            return "Error: camera name must match configured camera"
-        else:
-            self.get_detections(await self.camera.get_image())
     
-    async def get_detections(
-        self,
-        image: Image.Image,
-        *,
-        extra: Optional[Mapping[str, Any]] = None,
-        timeout: Optional[float] = None,
-    ) -> List[Detection]:
-        
-        detections = []
-
-        if not self.area_dims_calculated:
-            await self.calculate_area_dims()
-
+    async def do_vision(self, image):
         tasks = []
         for g in self.group_states:
             i = 0
@@ -282,7 +274,42 @@ class SceneIqVision(Vision, EasyResource):
                     case "sensor":
                         tasks.append(asyncio.create_task(a.get_classification(self.logger, g.actual_resource)))
         await asyncio.gather(*tasks)
+    
+        classification = self.default_classification
+        for expression in self.classification_expressions:
+            exp_result = eval_area_expression(expression["expression"], self.group_states)
+            if exp_result:
+                classification = expression["label"]
+                break
+        
+        CLASSIFICATION_GLOBAL[self.name] = classification
 
+    async def get_detections_from_camera(
+        self, camera_name: str, *, extra: Optional[Mapping[str, Any]] = None, timeout: Optional[float] = None
+    ) -> List[Detection]:
+        if camera_name != self.camera_name:
+            return "Error: camera name must match configured camera"
+        else:
+            self.get_detections(await self.camera.get_image())
+
+    async def get_detections(
+        self,
+        image: Image.Image,
+        *,
+        extra: Optional[Mapping[str, Any]] = None,
+        timeout: Optional[float] = None,
+    ) -> List[Detection]:
+        
+        detections = []
+
+        if not self.area_dims_calculated:
+            await self.calculate_area_dims()
+
+        current_time = datetime.now()
+        if self.last_vision_ts is None or (current_time - self.last_vision_ts).total_seconds() > self.max_vision_sec:
+            await self.do_vision(image)
+            self.last_vision_ts = current_time
+        
         for group in self.group_states:
             for area in group.areas:
                 # we could make this more efficient by storing it previously when it was calculated
@@ -305,7 +332,10 @@ class SceneIqVision(Vision, EasyResource):
         extra: Optional[Mapping[str, Any]] = None,
         timeout: Optional[float] = None,
     ) -> List[Classification]:
-        raise NotImplementedError()
+        if camera_name != self.camera_name:
+            return "Error: camera name must match configured camera"
+        else:
+            self.get_classifications(await self.camera.get_image(), count)
  
     async def get_classifications(
         self,
@@ -315,8 +345,17 @@ class SceneIqVision(Vision, EasyResource):
         extra: Optional[Mapping[str, Any]] = None,
         timeout: Optional[float] = None,
     ) -> List[Classification]:
-        raise NotImplementedError()
+        
+        if not self.area_dims_calculated:
+            await self.calculate_area_dims()
 
+        current_time = datetime.now()
+        if self.last_vision_ts is None or (current_time - self.last_vision_ts).total_seconds() > self.max_vision_sec:
+            await self.do_vision(image)
+            self.last_vision_ts = current_time
+
+        return [{"class_name": CLASSIFICATION_GLOBAL[self.name], "confidence": 1}]
+    
     async def get_object_point_clouds(
         self, camera_name: str, *, extra: Optional[Mapping[str, Any]] = None, timeout: Optional[float] = None
     ) -> List[PointCloudObject]:
@@ -339,6 +378,8 @@ class SceneIqVision(Vision, EasyResource):
         result = CaptureAllResult()
         result.image = await self.camera.get_image()
         result.detections = await self.get_detections(result.image)
+        result.classifications = await self.get_classifications(result.image, 1)
+
         return result
 
     async def get_properties(
@@ -348,7 +389,7 @@ class SceneIqVision(Vision, EasyResource):
         timeout: Optional[float] = None,
     ) -> GetPropertiesResponse:
         return GetPropertiesResponse(
-            classifications_supported=False,
+            classifications_supported=True,
             detections_supported=True,
             object_point_clouds_supported=False
         )

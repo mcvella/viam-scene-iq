@@ -2,6 +2,7 @@ from viam.media.utils.pil import viam_to_pil_image, pil_to_viam_image
 from PIL import Image
 from viam.media.video import CameraMimeType
 from datetime import datetime
+import re
 
 def check_box_overlap(box1, box2, threshold=0.0):
     """
@@ -155,3 +156,65 @@ def classification_to_float(classification):
     elif isinstance(classification, int):  
         return float(classification)  # Convert int -> float
     return classification 
+
+
+def get_group(groups, name):
+    """Find a group by name."""
+    return next((g for g in groups if g.name == name), None)
+
+def avg(group):
+    """Calculate the average classification value of a group's areas."""
+    if not group or not group.areas:
+        return 0
+    values = [(a.classification if isinstance(a.classification, (int, float)) else int(a.classification)) for a in group.areas]
+    return sum(values) / len(values) if values else 0
+
+def count(group):
+    """Count the sum of classification values in a group's areas."""
+    if not group or not group.areas:
+        return 0
+    return sum(a.classification if isinstance(a.classification, (int, float)) else int(a.classification) for a in group.areas)
+
+def avg_max(group, x):
+    """Find the average of the highest classification values from the last X stored values across areas."""
+    if not group or not group.areas:
+        return 0
+    max_values = [
+        max([(v if isinstance(v, (int, float)) else int(v)) for v in area.history.get()[:x]], default=0)
+        for area in group.areas
+    ]
+    return sum(max_values) / len(max_values) if max_values else 0
+
+def count_max(group, x):
+    """Sum the highest classification value from the last X stored values in history for each area."""
+    if not group or not group.areas:
+        return 0
+    return sum(
+        max([(v if isinstance(v, (int, float)) else int(v)) for v in area.history.get()[:x]], default=0)
+        for area in group.areas
+    )
+
+def eval_area_expression(expression, groups):
+    """Evaluate a logical expression based on group data."""
+    expression = expression.replace("&&", " and ").replace("||", " or ")
+
+    # Match avg(), count(), avg_max(), and count_max()
+    pattern = re.compile(r"(avg|count|avg_max|count_max)\((\w+)(?:,\s*(\d+))?\)")
+    matches = pattern.findall(expression)
+
+    for func, group_name, x in matches:
+        group = get_group(groups, group_name)
+        if func == "avg":
+            value = avg(group)
+        elif func == "count":
+            value = count(group)
+        elif func == "avg_max":
+            value = avg_max(group, int(x)) if x else 0  # Default to 0 if no X provided
+        elif func == "count_max":
+            value = count_max(group, int(x)) if x else 0  # Default to 0 if no X provided
+        else:
+            continue
+        
+        expression = expression.replace(f"{func}({group_name}{', ' + x if x else ''})", str(value))
+
+    return eval(expression)
